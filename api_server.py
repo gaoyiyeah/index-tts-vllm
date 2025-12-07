@@ -2,6 +2,7 @@
 import os
 import asyncio
 import io
+import re
 import traceback
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -113,6 +114,60 @@ async def tts_api_url(request: Request):
         )
 
 
+def parse_llm_response(response_text):
+    """
+    解析 LLM 回复，提取情感标签和语音内容。
+
+    Args:
+        response_text (str): 大模型的原始回复文本，例如 "【happy】今天真不错！"
+
+    Returns:
+        dict: 包含 'tag' (str) 和 'content' (str) 的字典。
+    """
+
+    # 1. 预处理：去除首尾空白字符
+    text = response_text.strip()
+
+    # 2. 定义正则模式
+    # ^             : 匹配字符串开头
+    # [\[【]        : 兼容中文 '【' 或 英文 '['
+    # (.*?)         : 捕获组1（标签），非贪婪匹配，提取标签内容
+    # [\]】]        : 兼容中文 '】' 或 英文 ']'
+    # \s* : 允许标签和内容之间有任意空格
+    # (.*)          : 捕获组2（内容），匹配剩余所有文本
+    # re.DOTALL     : 让 '.' 也能匹配换行符（防止回答包含换行时截断）
+    pattern = r"^[\[【](.*?)[\]】]\s*(.*)$"
+
+    match = re.match(pattern, text, re.DOTALL)
+
+    if match:
+        # 提取并清洗数据
+        raw_tag = match.group(1).strip()
+        content = match.group(2).strip()
+
+        # 3. 安全校验：确保提取的标签在你的允许列表中
+        # 如果模型输出了 'excited' 这种不在列表里的词，强制转为 'normal'
+        valid_tags = {
+            'normal', 'angry', 'disgusted', 'fear', 'happy',
+            'sad', 'shock', 'loudly', 'quietly', 'whisper'
+        }
+
+        # 将标签转为小写比较，增加鲁棒性
+        tag = raw_tag.lower() if raw_tag.lower() in valid_tags else 'normal'
+
+        return {
+            "tag": tag,
+            "content": content
+        }
+    else:
+        # 4. 兜底策略 (Fallback)
+        # 如果正则未匹配（例如模型忘了加标签），默认使用 normal
+        return {
+            "tag": "normal",
+            "content": text
+        }
+
+
 @app.post("/tts", responses={
     200: {"content": {"application/octet-stream": {}}},
     500: {"content": {"application/json": {}}}
@@ -158,7 +213,6 @@ async def tts_voices():
         return []
 
 
-
 @app.post("/audio/speech", responses={
     200: {"content": {"application/octet-stream": {}}},
     500: {"content": {"application/json": {}}}
@@ -169,7 +223,12 @@ async def tts_api_openai(request: Request):
         data = await request.json()
         text = data["input"]
         character = data["voice"]
-        #model param is omitted
+        llm_result = parse_llm_response(text)
+        text = llm_result.get("content")
+        style = llm_result.get("tag")
+        if character == "orange":
+            character = f"{character}_{style}"
+        # model param is omitted
         _model = data["model"]
 
         global tts
